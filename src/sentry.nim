@@ -7,6 +7,7 @@ import strutils
 import times
 import uri
 import uuids
+import logging
 
 const CLIENT_VERSION = "0.1.0"
 
@@ -26,6 +27,12 @@ type
     scope*: JsonNode
     when defined(dryrun):
       sent*: seq[LoggedRequest]
+
+template neverFail(body: untyped): untyped =
+  try:
+    body
+  except:
+    warn "[sentry] failure in sentry code: " & getCurrentExceptionMsg()
 
 proc newSentryClient*(): SentryClient =
   new(result)
@@ -49,15 +56,18 @@ proc merge(base: JsonNode, newdata: JsonNode): JsonNode =
     result[k] = v
 
 proc init*(s: SentryClient, dsn = "") =
-  s.dsn = dsn
-  if dsn != "":
-    let parsed = parseUri(dsn)
-    let parts = parsed.path.rsplit("/", 1)
-    let path = parts[0]
-    let project_id = parts[1]
-    s.baseurl = &"{parsed.scheme}://{parsed.hostname}{path}/api/{project_id}"
-    s.public_key = parsed.username
-    s.secret_key = parsed.password
+  neverFail:
+    s.dsn = dsn
+    if dsn == "":
+      warn "[sentry] init without DSN"
+    else:
+      let parsed = parseUri(dsn)
+      let parts = parsed.path.rsplit("/", 1)
+      let path = parts[0]
+      let project_id = parts[1]
+      s.baseurl = &"{parsed.scheme}://{parsed.hostname}{path}/api/{project_id}"
+      s.public_key = parsed.username
+      s.secret_key = parsed.password
 
 proc auth_header(s: SentryClient): string =
   result = &"Sentry sentry_version=7, sentry_client=nim-sentry/{CLIENT_VERSION}, sentry_timestamp={getTime().toUnixFloat()}, sentry_key={s.public_key}"
@@ -67,50 +77,61 @@ proc auth_header(s: SentryClient): string =
 proc uuid(): string {.inline.} = ($genUUID()).replace("-", "")
 
 proc sendEvent(s: SentryClient, data: JsonNode) =
-  var ev = s.scope.copyAndMerge(%* {
-    "event_id": uuid(),
-    "timestamp": tstamp(),
-  }).merge(data)
-  let url = s.baseurl & "/store/"
-  let client = newAsyncHttpClient()
-  client.headers = newHttpHeaders({
-    "X-Sentry-Auth": s.auth_header(),
-    "Content-Type": "application/json",
-    "User-Agent": "nim-sentry/" & CLIENT_VERSION,
-  })
-  when defined(dryrun):
-    let req: LoggedRequest = (url, ev, client.headers)
-    s.sent.add(req)
-  else:
-    asyncCheck client.postContent(url, body = $ev)
+  neverFail:
+    if s.baseurl == "":
+      warn "[sentry] unconfigured attempt to send event"
+    else:
+      var ev = s.scope.copyAndMerge(%* {
+        "event_id": uuid(),
+        "timestamp": tstamp(),
+      }).merge(data)
+      let url = s.baseurl & "/store/"
+      let client = newAsyncHttpClient()
+      client.headers = newHttpHeaders({
+        "X-Sentry-Auth": s.auth_header(),
+        "Content-Type": "application/json",
+        "User-Agent": "nim-sentry/" & CLIENT_VERSION,
+      })
+      when defined(dryrun):
+        let req: LoggedRequest = (url, ev, client.headers)
+        s.sent.add(req)
+      else:
+        asyncCheck client.postContent(url, body = $ev)
 
 proc captureException*(s: SentryClient, exc: ref Exception) =
-  if s.baseurl != "":
-    var chain = newJArray()
-    var pexc = exc
-    while not pexc.isNil:
-      chain.add(%* {
-        "type": $pexc.name,
-        "value": $pexc.msg,
+  neverFail:
+    if s.baseurl == "":
+      warn "[sentry] unconfigured attempt to captureException"
+    else:
+      var chain = newJArray()
+      var pexc = exc
+      while not pexc.isNil:
+        chain.add(%* {
+          "type": $pexc.name,
+          "value": $pexc.msg,
+        })
+        pexc = pexc.parent
+      s.sendEvent(%* {
+        "exception": {
+          "values": chain,
+        }
       })
-      pexc = pexc.parent
-    s.sendEvent(%* {
-      "exception": {
-        "values": chain,
-      }
-    })
 
 proc captureException*(s: SentryClient) {.inline.} =
-  s.captureException(getCurrentException())
+  neverFail:
+    s.captureException(getCurrentException())
 
 proc captureMessage*(s: SentryClient, msg: string) =
-  if s.baseurl != "":
-    s.sendEvent(%* {
-      "level": "info",
-      "message": {
-        "formatted": msg,
-      }
-    })
+  neverFail:
+    if s.baseurl == "":
+      warn "[sentry] unconfigured attempt to captureMessage"
+    else:
+      s.sendEvent(%* {
+        "level": "info",
+        "message": {
+          "formatted": msg,
+        }
+      })
 
 proc newScope*(s: SentryClient): SentryClient =
   result = newSentryClient()
@@ -118,11 +139,12 @@ proc newScope*(s: SentryClient): SentryClient =
   result.scope = s.scope.copy()
 
 proc flush*(s: SentryClient): Future[void] {.async.} =
-  if s.baseurl != "":
-    try:
-      drain()
-    except ValueError:
-      discard
+  neverFail:
+    if s.baseurl != "":
+      try:
+        drain()
+      except ValueError:
+        discard
 
 #-----------------------------------------------------------------
 # Global instance
