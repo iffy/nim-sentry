@@ -133,10 +133,12 @@ proc captureMessage*(s: SentryClient, msg: string) =
         }
       })
 
-proc newScope*(s: SentryClient): SentryClient =
+proc newScope*(s: SentryClient, data = newJNull()): SentryClient =
   result = newSentryClient()
   result.init(s.dsn)
   result.scope = s.scope.copy()
+  if data.kind == JObject:
+    result.scope = result.scope.merge(data)
 
 proc flush*(s: SentryClient): Future[void] {.async.} =
   neverFail:
@@ -149,22 +151,22 @@ proc flush*(s: SentryClient): Future[void] {.async.} =
 #-----------------------------------------------------------------
 # Global instance
 #-----------------------------------------------------------------
-var globalSentryClient = newSentryClient()
+var sentryClient* = newSentryClient()
 
 proc init*(dsn = "") {.inline.} =
-  globalSentryClient.init(dsn)
+  sentryClient.init(dsn)
 
 proc captureException*(exc: ref Exception) {.inline.} =
-  globalSentryClient.captureException(exc)
+  sentryClient.captureException(exc)
 
 proc captureException*() {.inline.} =
-  globalSentryClient.captureException()
+  sentryClient.captureException()
 
 proc captureMessage*(msg: string) {.inline.} =
-  globalSentryClient.captureMessage(msg)
+  sentryClient.captureMessage(msg)
+
+proc newScope*(data = newJNull()): SentryClient =
+  sentryClient.newScope(data)
 
 proc flushSentry*(): Future[void] {.inline.} =
-  globalSentryClient.flush()
-
-when defined(dryrun):
-  proc sentryClient*(): SentryClient = globalSentryClient
+  sentryClient.flush()

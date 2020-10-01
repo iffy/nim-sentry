@@ -19,6 +19,8 @@ test "empty":
 test "global":
   init("http://user@127.0.0.1:8080/1")
   captureMessage("from unit tests")
+  let s = newScope(%* {"foo": "bar"})
+  s.captureMessage("heyo")
   waitFor flushSentry()
 
 let dsn = getEnv("SENTRY_TEST_DSN")
